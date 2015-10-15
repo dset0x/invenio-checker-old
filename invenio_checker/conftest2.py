@@ -140,6 +140,7 @@ def start_action_dec(action_type, **dec_kwargs):
 
 
 def pytest_collection_modifyitems(session, config, items):
+    """Call when pytest has finished collecting items."""
     _pytest_collection_modifyitems(session, config, items)
 
 
@@ -152,37 +153,45 @@ def _pytest_collection_modifyitems(session, config, items):
     :type items: list
     """
     redis_worker = config.option.redis_worker
+    unique_functions_found = set((item.function for item in items))
 
-    with start_action(action_type='get performance hints'):
-        unique_functions_found = set((item.function for item in items))
-        assert len(unique_functions_found) == 1,\
-            "We only support one check function per file. Found {0} instead. "\
-            "Don't forget to scroll up for other exceptions!"\
+    if not unique_functions_found:
+        raise AssertionError(
+            "No check functions were found."
+            " Scroll up for exceptions that may have prevented collection!"
+        )
+    elif not len(unique_functions_found) == 1:
+        raise AssertionError(
+            "We support one check function per file. Found {0} instead."
             .format(len(unique_functions_found))
-        item = items[0]
-        # Set allowed_paths and allowed_recids
-        if hasattr(item, 'cls'):
-            if hasattr(item.cls, 'allowed_paths'):
-                allowed_paths = item.cls.allowed_paths(config.option.invenio_rule.arguments)
-            else:
-                allowed_paths = set()
-            if hasattr(item.cls, 'allowed_recids'):
-                allowed_recids = item.cls.allowed_recids(config.option.invenio_rule.arguments,
-                                                         batch_recids(session),
-                                                         all_recids(session),
-                                                         search(session))
-            else:
-                allowed_recids = batch_recids(session)
+        )
+    item = items[0]
 
-        Message.log(message_type='ensure hints returned sane values')
-        # We could be intersecting instead of raising, but we are evil.
-        if allowed_recids - all_recids(session):
-            raise Exception('Check requested recids that are not in the database!')
-        # TODO Must return jsonpointers (IETF RFC 6901)
+    # Set allowed_paths and allowed_recids
+    if hasattr(item, 'cls'):
+        if hasattr(item.cls, 'allowed_paths'):
+            allowed_paths = item.cls.allowed_paths(
+                config.option.invenio_rule.arguments
+            )
+        else:
+            allowed_paths = set()
+        if hasattr(item.cls, 'allowed_recids'):
+            allowed_recids = item.cls.allowed_recids(
+                config.option.invenio_rule.arguments,
+                batch_recids(session),
+                all_recids(session),
+                search(session)
+            )
+        else:
+            allowed_recids = batch_recids(session)
 
-        Message.log(message_type='store performance hints')
-        redis_worker.allowed_paths = allowed_paths
-        redis_worker.allowed_recids = allowed_recids
+    if allowed_recids - all_recids(session):
+        raise AssertionError('Check requested recids that are not in the'
+                             ' database!')
+    # TODO `allowed_paths` must return jsonpointers (IETF RFC 6901)
+
+    redis_worker.allowed_paths = allowed_paths
+    redis_worker.allowed_recids = allowed_recids
 
     def worker_conflicts_with_currently_running(worker):
         foreign_running_workers = get_workers_with_unprocessed_results()
@@ -192,7 +201,7 @@ def _pytest_collection_modifyitems(session, config, items):
                 blockers.add(foreign)
         return blockers
 
-    redis_worker.status = StatusWorker.ready  # unused?
+    redis_worker.status = StatusWorker.ready  # XXX unused?
     with start_action(action_type='checking for conflicting running workers'):
         redis_worker.lock.get()
         try:
