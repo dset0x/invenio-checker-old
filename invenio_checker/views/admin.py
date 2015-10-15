@@ -25,8 +25,7 @@ from itertools import chain
 from collections import defaultdict
 from intbitset import intbitset
 
-from six import reraise
-from cerberus import Validator
+import six
 
 from flask import (
     Blueprint,
@@ -36,6 +35,7 @@ from flask import (
     stream_with_context,
     url_for,
     render_template_string,
+    render_template,
 )
 from flask.json import jsonify
 from flask_breadcrumbs import register_breadcrumb
@@ -48,8 +48,6 @@ from wtforms import (  # pylint: disable=no-name-in-module
     validators,
     ValidationError,
 )
-from wtforms.widgets import TextInput
-from wtforms.ext.appengine.db import model_form
 
 from invenio.ext.sqlalchemy import db
 from invenio.base.decorators import templated
@@ -57,23 +55,24 @@ from invenio.base.i18n import _
 from invenio.ext.principal import permission_required
 from ..acl import viewchecker, modifychecker
 
-from invenio_checker.models import (
+from ..models import (
     CheckerRule,
     CheckerRuleExecution,
+    CheckerReporter,
+    default_date,
 )
-from invenio_checker.views.config import (
+from ..views.config import (
     task_mapping,
     check_mapping,
     log_mapping,
 )
 
-from ..registry import plugin_files
+from ..registry import plugin_files, reporters_files
 
-from ..common import ALL
 from ..recids import ids_from_input
 import sys
 from croniter import croniter
-
+import json
 
 from functools import partial
 from invenio.utils import forms
@@ -91,17 +90,14 @@ def get_NewTaskForm(*args, **kwargs):
             validators=[validators.InputRequired()],
         )
         plugin = fields.SelectField(
-            'Plugin',
+            'Check',
             choices=[(plugin, plugin) for plugin in plugin_files],
             validators=[validators.InputRequired()],
         )
-        send_email = fields.SelectField(
-            'Send email',
-            choices=[
-                ('on_failure', 'On failure'),
-                ('always', 'Always'),
-                ('never', 'Never'),
-            ],
+        reporters = fields.SelectMultipleField(
+            'Reporters',
+            # XXX If you rename `reporter` to `plugin`, all hell breaks loose.
+            choices=[(reporter, reporter) for reporter in reporters_files],
         )
         consider_deleted_records = fields.BooleanField(
             'Consider deleted records',
@@ -128,7 +124,7 @@ def get_NewTaskForm(*args, **kwargs):
             ]
         )
         # Hidden
-        periodic = fields.BooleanField(
+        schedule_enabled = fields.BooleanField(
             'Run this rule periodically',
         )
         modify = fields.BooleanField(
@@ -147,7 +143,7 @@ def get_NewTaskForm(*args, **kwargs):
                     field.data = ids_from_input(field.data)
                 except TypeError:
                     etype, evalue, etb = sys.exc_info()
-                    reraise(ValidationError, evalue, etb)
+                    six.reraise(ValidationError, evalue, etb)
 
         def validate_schedule(self, field):
             """Ensure that `schedule` is accepted by `croniter`."""
@@ -158,11 +154,7 @@ def get_NewTaskForm(*args, **kwargs):
             except Exception:
                 # May be TypeError/KeyError/AttributeError, who knows what else
                 # Let's play it safe.
-                reraise(ValidationError, *sys.exc_info()[1:])
-
-        def validate_send_email(self, field):
-            from ..models import SendEmail
-            field.data = SendEmail[field.data]
+                six.reraise(ValidationError, *sys.exc_info()[1:])
 
     return NewTaskForm(*args, **kwargs)
 
@@ -171,6 +163,16 @@ def get_NewTaskForm(*args, **kwargs):
 def index():
     """Redirect to the tasks view."""
     return redirect(url_for('.view', page_name='tasks'))
+
+
+@blueprint.route('/api/records/get')
+@login_required
+@permission_required(viewchecker.name)
+def record_brief():
+    from invenio_search.api import Query
+    records = Query(request.args['query']).search().records()[:5]
+    return ''.join(render_template('format/record/Default_HTML_brief.tpl', record=i)
+                   for i in records)
 
 
 @blueprint.route('/view/<page_name>')
@@ -189,7 +191,7 @@ def view(page_name):
 @blueprint.route('/api/tasks/get/data', methods=['GET'])
 @login_required
 @permission_required(viewchecker.name)
-def get_tasks_data():
+def get_all_tasks_data():
     """
     Return a JSON representation of the CheckerRule data.
 
@@ -203,21 +205,29 @@ def get_tasks_data():
     row_list = []
     rules = CheckerRule.query.all()
     for rule in rules:
-        rule_d = rule.__dict__  # Work around inveniosoftware/invenio-ext#16
-        rule_d = {key: val for key, val in rule_d.items()
-                  if not key.startswith('_')}
-        rule_d['arguments'] = str(rule_d['arguments'])
-        if rule_d['filter_records'].is_infinite():
-            rule_d['filter_records'] = ''
-        else:
-            rule_d['filter_records'] = ranges_str(rule_d['filter_records'])
-        rule_d['send_email'] = rule_d['send_email'].name  # FIXME: This is weird and not displayed
-        for key, val in rule_d.items():
-            if isinstance(val, bool):
-                rule_d[key] = int(val)
-        row_list.append(rule_d)
+        row_list.append(get_task_data(rule))
     return jsonify({'rows': row_list, 'cols': column_list})
 
+@blueprint.route('/api/tasks/get/data/<task_name>', methods=['POST'])
+@login_required
+@permission_required(viewchecker.name)
+def get_single_task(task_name):
+    return jsonify(get_task_data(CheckerRule.query.get(task_name)))
+
+def get_task_data(rule):
+    rule_d = rule.__dict__  # Work around inveniosoftware/invenio-ext#16
+    rule_d = {key: val for key, val in rule_d.items()
+              if not key.startswith('_')}
+
+    # Serialization hacks
+    rule_d['arguments'] = json.dumps(rule_d['arguments'],
+                                     default=default_date)
+    if rule_d['filter_records'].is_infinite():
+        rule_d['filter_records'] = ''
+    else:
+        rule_d['filter_records'] = ranges_str(rule_d['filter_records'])
+    rule_d['reporters'] = [rep.plugin for rep in rule.reporters]
+    return rule_d
 
 # Checks
 @blueprint.route('/api/checks/get/data', methods=['GET'])
@@ -302,54 +312,118 @@ def task_create():
     plugin_name = request.form['plugin_name']
     form = get_ArgForm(plugin_name)
     task_name = request.form.get('task_name')
+
+    # If a `task_name` was sent in the request, then an already-existing's
+    # plugin's contents should be filled-in. (eg editing an existing task)
     if task_name:
-        task_arguments = CheckerRule.query.get(task_name).arguments
-        for key, val in task_arguments.items():
-            setattr(getattr(form, key), 'data', val)
+        if plugin_name in plugin_files:
+            task = CheckerRule.query.get(task_name)
+        elif plugin_name in reporters_files:
+            task = CheckerReporter.query.filter(
+                CheckerReporter.rule_name == task_name,
+                CheckerReporter.plugin == plugin_name).first()
+        # The query will only have returned something if the specified
+        # task_name already has a relationship with a `plugin_name` type
+        # reporter.
+        if task:
+            for key, val in task.arguments.items():
+                key = "arg_"+plugin_name+"_"+key
+                field = getattr(form, key)
+                # For choice fields, the field requires that the `data` is
+                # `str(idx_of_selection)`
+                if hasattr(field, 'choices'):
+                    if isinstance(val, six.text_type): # Single choice
+                        val = next((str(idx) for idx, choice in field.choices
+                                    if choice == val))
+                    else:  # Multi choice
+                        # UNTESTED XXX
+                        val = [str(idx) for idx, choice in field.choices
+                               if choice in val]
+                setattr(field, 'data', val)
+
     return render_template_string('''
     {% import 'checker/admin/macros_bootstrap.html' as bt %}
     {{ bt.render_form(form, nested=True) }}
     ''', form=form)
 
-def get_schema_for_plugin(plugin_name):
-    if plugin_name not in plugin_files:
-        raise Exception(plugin_name)  # TODO
-    module = import_module(plugin_name)
-    try:
-        return module.argument_schema
-    except AttributeError:
-        return {}
-
-type_to_wtforms = {
-    "string": partial(fields.StringField, validators=[validators.InputRequired()]),
-    "text": partial(fields.TextAreaField, validators=[validators.InputRequired()]),
-    "integer": partial(fields.IntegerField, validators=[validators.InputRequired()]),
-    "float": partial(fields.DecimalField, validators=[validators.InputRequired()]),
-    "decimal": partial(fields.DecimalField, validators=[validators.InputRequired()]),
-    "boolean": fields.BooleanField,
-
-    "datetime": partial(fields.DateTimeField, widget=forms.DateTimePickerWidget()),
-    "date": partial(fields.DateField, widget=forms.DatePickerWidget()),
-}
-
 def get_ArgForm(plugin_name, *args, **kwargs):
     """Get a WTForms form based on the cerberus schema defined in the check."""
 
     class ArgForm(Form):
-        """Empty form to populate based on cerberus schema."""
+        """Empty form to populate based on plugin-provided schema."""
 
-    arguments_schema = {"arg_" + k: v for k, v
-                        in get_schema_for_plugin(plugin_name).items()}
-    for key, spec in arguments_schema.items():
-        setattr(ArgForm, key, type_to_wtforms[spec['type']]())
+        @property
+        def data_for_db(self):
+            ret = {}
+            for key, val in self.data.items():
+                stripped_key = key[len(ArgForm.prefix+"_"):]
+                field = getattr(self, key)
+                schema = ArgForm.schema
+                # Don't change the order of the checks here:
+                # SelectMultipleField inherits from SelectField
+                if isinstance(field, fields.SelectMultipleField):
+                    val = [schema[stripped_key]['values'][int(itm)]
+                           for itm in val]
+                elif isinstance(field, fields.SelectField):
+                    val = schema[stripped_key]['values'][int(val)]
+                ret[stripped_key] = val
+            return ret
+
+    type_to_wtforms = {
+        "string": partial(fields.StringField, validators=[validators.InputRequired()]),
+        "text": partial(fields.TextAreaField, validators=[validators.InputRequired()]),
+        "integer": partial(fields.IntegerField, validators=[validators.InputRequired()]),
+        "float": partial(fields.DecimalField, validators=[validators.InputRequired()]),
+        "decimal": partial(fields.DecimalField, validators=[validators.InputRequired()]),
+        "boolean": partial(fields.BooleanField, validators=[]),
+
+        "choice": partial(fields.SelectField, validators=[validators.InputRequired()]),
+        "choice_multi": partial(fields.SelectMultipleField, validators=[]),
+
+        "datetime": partial(fields.DateTimeField, widget=forms.DateTimePickerWidget()),
+        "date": partial(fields.DateField, widget=forms.DatePickerWidget()),
+    }
+
+    def get_schema(plugin_name):
+        if plugin_name not in plugin_files.keys() + reporters_files.keys():
+            raise Exception(plugin_name)  # TODO
+        module = import_module(plugin_name)
+        try:
+            return module.argument_schema
+        except AttributeError:
+            return {}
+
+    def build_choices(schema, type_name, key):
+        if type_name in ('choice', 'choice_multi'):
+            ret = {'choices':[]}
+            for idx, choice in enumerate(schema[key]['values']):
+                ret['choices'].append((idx, choice))
+            return ret
+        else:
+            return {}
+
+    # FIXME: These names might create collisions?
+    ArgForm.plugin_name = plugin_name
+    ArgForm.prefix = "arg_{}".format(plugin_name)
+    ArgForm.schema = get_schema(plugin_name)
+    for key, spec in ArgForm.schema.items():
+        type_name = spec['type']
+        type_kwargs = build_choices(ArgForm.schema, type_name, key)
+        try:
+            type_kwargs['label'] = spec['label']
+        except KeyError:
+            type_kwargs['label'] = key
+        prefixed_key = "{}_{}".format(ArgForm.prefix, key)
+        setattr(ArgForm, prefixed_key, type_to_wtforms[type_name](**type_kwargs))
 
     return ArgForm(*args, **kwargs)
+
 
 @blueprint.route('/api/task_create/submit', methods=['POST'])
 @login_required
 @permission_required(viewchecker.name)
-@templated('checker/admin/task_create.html')
 def submit_task():
+    """Record a user-created task to the database and run."""
     from ..supervisor import run_task
 
     def failure(type_, errors):
@@ -359,50 +433,69 @@ def submit_task():
     def success():
         return jsonify({})
 
+    # Recreate the forms that we have previously served to the user so that we
+    # can validate.
     form_origin = get_NewTaskForm(request.form)
     form_plugin = get_ArgForm(request.form['plugin'], request.form)
-
-    if form_origin.validate() & form_plugin.validate():
-        # Prepare form to its final form
-        form_for_db = form_origin.data.copy()
-
-        periodic = form_for_db.pop('periodic', False)
-        modify = form_for_db.pop('modify', False)
-        original_name = form_for_db.pop('original_name', False)
-        requested_action = form_for_db.pop('requested_action', False)
-
-        if not periodic:
-            form_for_db['schedule'] = None
-
-        try:
-            # Save
-            if modify:
-                task = CheckerRule.query.get(original_name)
-                for key, val in form_for_db.iteritems():
-                    setattr(task, key, val)
-                task.arguments=form_plugin.data
-            else:
-                form_for_db['last_run'] = datetime.now()
-                task = CheckerRule(
-                    arguments=form_plugin.data,
-                    **form_for_db
-                )
-            db.session.add(task)
-            db.session.commit()
-            if requested_action.startswith('submit_run'):
-                run_task(task.name)
-        except Exception as e:
-            return failure('general', (str(e),))
-        return success()
-
-    else:
+    if not (form_origin.validate() & form_plugin.validate()):
         form_errors = defaultdict(list)
-        for field, errors in chain(
-                form_origin.errors.items(),
-                form_plugin.errors.items(),
-        ):
+        for field, errors in chain(form_origin.errors.items(),
+                                   form_plugin.errors.items()):
             form_errors[field].extend(errors)
         return failure('validation', form_errors)
+
+    # Get a dictionary that we can pass as kwargs to the database object,
+    form_for_db = dict(form_origin.data)
+    # but first, pop metadata out of it.
+    form_for_db.pop('modify', False)
+    modify = 'modify' in request.form
+    original_name = form_for_db.pop('original_name', False)
+    requested_action = form_for_db.pop('requested_action', False)
+    reporter_names = form_for_db.pop('reporters', [])
+
+    if modify:
+        task = CheckerRule.query.get(original_name)
+        for key, val in form_for_db.iteritems():
+            setattr(task, key, val)
+    else:
+        task = CheckerRule(**form_for_db)
+
+    # Modify the rule as requested. Don't flush until we say so so that any
+    # exceptions are in the try block.
+    with db.session.no_autoflush:
+        # Add arguments
+        task.arguments = form_plugin.data_for_db
+        # Add reporters
+        form_reporters = [
+            get_ArgForm(reporter_name, request.form)
+            for reporter_name in reporter_names
+        ]
+        new_reporters = []
+        if form_reporters:
+            for form_reporter in form_reporters:
+                new = CheckerReporter(
+                    plugin=form_reporter.plugin_name,
+                    arguments=form_reporter.data_for_db,
+                    rule_name=task.name,
+                )
+                new_reporters.append(new)
+                db.session.add(new)
+        task.reporters = new_reporters
+
+    try:
+        db.session.add(task)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        return failure('general', (str(e),))
+
+    if requested_action.startswith('submit_run'):
+        try:
+            run_task(task.name)
+        except Exception as e:
+            return failure('general', (str(e),))
+
+    return success()
 
 @blueprint.route('/translate', methods=['GET'])
 @login_required

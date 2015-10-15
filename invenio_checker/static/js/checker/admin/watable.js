@@ -63,12 +63,13 @@ define(
     });
 
 
-    function switchTo(page_name, template) {
+    function switchTo(page_name, inherit) {
       history.pushState('data', '', page_name);
       $(".switchable").hide();
       updateSubtitle(page_name);
       if (['task_create', 'task_modify'].indexOf(page_name) >= 0) {
-        renderTaskForm(page_name, template);
+        refreshFloater();
+        renderTaskForm(page_name, inherit);
       } else {
         loadTable(page_name);
       }
@@ -127,7 +128,11 @@ define(
           // No button was explicitly clicked. Bail out.
           return false;
         }
-        jqForm[0].requested_action.value = last_pressed_button;
+        formData.map( function(item) {
+          if (item.name === 'requested_action') {
+            item.value = last_pressed_button;
+          }
+        });
       }
 
       var options = {
@@ -153,7 +158,6 @@ define(
 
       // Prepare periodic checks
       $("#periodic").after("<div id='cronexp' style='display: inline;'></div>");
-      periodicToggle(false);
       $("#cronexp").hide();
 
       // Manually hide fields
@@ -163,27 +167,29 @@ define(
       $("#task-insertion-failure").hide();
     }
 
-    function renderTaskForm(action, template) {
-      // Fill in fields that exist in template
-      $("[id^='arg_']").closest(".row").remove();
-      if (template !== undefined) {
-        for (var key in template) {
-          if (template.hasOwnProperty(key)) {
-            var elem = $("#creation").find("#"+key);
-            if ($(elem).is(":checkbox")) {
-              $(elem).click();
-            } else {
-              $(elem).val(template[key]);
-            }
-          }
-        }
-      }
+    function formFilled(action, inherit) {
       if (action === 'task_modify') {
         $("#modify").prop("checked", true);
         $("#original_name").val($("#name").val());
       } else {
         $("#modify").prop("checked", false);
       }
+
+      // Refresh refreshable javascript elements
+      if (inherit === undefined) {
+        updateAllArguments();
+      } else {
+        updateAllArguments($("#name").val());
+      }
+      plugTypingSearchPattern();
+      if ($("#schedule").val() !== "") {
+        $('#periodic').click();  // Changing the attribute doesn't trigger event
+      }
+      $("#creation").show();
+    }
+
+    function renderTaskForm(action, inherit) {
+
       // Update title of form
       // var action_to_human = {
       //   task_create: "Please enter the new task's details",
@@ -197,44 +203,107 @@ define(
       //     $("#creation .panel-title").text(data);
       //   }
       // });
-      // Refresh refreshable javascript elements
-      if (template === undefined) {
-        updateCreationArguments();
+
+      // $("#new_task_form")[0].reset();  // Skips nested fields, so we do:
+      $("#new_task_form").find("input").val('');
+      // Fill in fields that exist in template
+      if (inherit !== undefined) {
+        $.ajax({
+          type: "POST",
+          url: "/admin/checker/api/tasks/get/data/" + inherit.task_name,
+          success: function(template) {
+
+            $("[id^='arg_']").closest(".row").remove();
+            for (var key in template) {
+              if (template.hasOwnProperty(key)) {
+                var elem = $("#creation").find("#"+key);
+                if ($(elem).is(":checkbox")) {
+                  $(elem).click();
+                } else {
+                  $(elem).val(template[key]);
+                }
+              }
+            }
+            formFilled(action, inherit);
+
+          }
+        });
       } else {
-        updateCreationArguments(template.name);
+        formFilled(action, inherit);
       }
-      if ($("#schedule").val() !== "") {
-        $('#periodic').click();  // Changing the attribute doesn't trigger event
-      }
-      $("#creation").show();
+
+    }
+
+    function plugTypingSearchPattern() {  // XXX Why is this called twice?
+      $("#filter_pattern").keyup(function() {
+        $.get(
+          "/admin/checker/api/records/get",
+          {query: $(this).val()},
+          function(data) {
+            $('#matching-records').empty();
+            $('#matching-records').append(data);
+          }
+        );
+      });
     }
 
     $("#plugin").change(function() {
-      updateCreationArguments();
+      updatePluginArguments($("#original_name").val());
+    });
+    $("#reporters").change(function(event) {
+      updateReporterArguments($("#original_name").val());
+      event.preventDefault();
     });
 
     // FIXME: Doesn't run on resetForm :<
     $("#new_task_form").on('reset', function() {
-      updateCreationArguments();
+      updateAllArguments();
     });
 
-    function updateCreationArguments(for_rule) {
-      var arg_rows = $("[id^='arg_']").closest(".row");
+    function updateAllArguments(for_rule) {
+      updatePluginArguments(for_rule);
+      updateReporterArguments(for_rule);
+    }
+
+    function updatePluginArguments(for_rule) {
       var plugin = $("#plugin");
       var plugin_row = $(plugin).closest(".row");
+      var plugin_name = $(plugin).val();
       $.ajax({
         type: "POST",
         url: "/admin/checker/api/task_create/get_arguments_spec/",
-        data: {plugin_name: $(plugin).val(), task_name: for_rule},
+        data: {plugin_name: plugin_name, task_name: for_rule},
         success: function(data) {
-          $(arg_rows).remove();
-          $(plugin_row).after(data);
+          $(".plugin-args").remove();
+          $(plugin_row).after('<div class="plugin-args">'+data+'</div>');
           plugDatePickers();
         }
       });
     }
 
+    function updateReporterArguments(for_rule) {
+      var reporters_row = $("#reporters").closest(".row");
+      $("#reporters :not(option:selected)").map(function(i, el) {
+        $("[id^='arg_"+el.value+"']").closest(".row").remove();
+      });
+      $("#reporters option:selected").map(function(i, el) {
+        var selector = "[id^='arg_"+el.value+"']";
+        if ($(selector).length === 0) {
+          $.ajax({
+            type: "POST",
+            url: "/admin/checker/api/task_create/get_arguments_spec/",
+            data: {plugin_name: el.value, task_name: for_rule},
+            success: function(data) {
+              $(reporters_row).after('<div class="reporter-args">'+data+'</div>');
+              plugDatePickers();
+            }
+          });
+        }
+      });
+    }
+
     // Periodic
+    periodicToggle(false);
     $('#periodic').bind('change', function(e) {
       var cur_input = $(this);
       if (cur_input.is(':checked')) {
@@ -315,14 +384,14 @@ define(
           },
           tableCreated: function(data) {
             bindCheckboxes(table_name);
-            refreshFloater(table_name);
+            refreshFloater();
           }
         }).data('WATable');
       } else {
        tbl.option('url', '/admin/checker/api/'+table_name+'/get/data');
        tbl.update(function() {
          bindCheckboxes(table_name);
-         refreshFloater(table_name);
+         refreshFloater();
        });
       }
       $('div#table-container').show();
@@ -330,11 +399,11 @@ define(
 
     function bindCheckboxes(table_name) {
       $('.watable-col-cbunique :checkbox, #table-container .checkToggle').on('change', function() {
-        refreshFloater(table_name);
+        refreshFloater();
       });
     }
 
-    function refreshFloater(table_name) {
+    function refreshFloater() {
       // Reset
       $(floater).hide();  // hide is faster than remove, removes flicker
 
@@ -342,7 +411,7 @@ define(
       // not updated mid-check.
       var selected_rows_len = $(".watable-col-cbunique :checkbox:checked").length;
 
-      if (table_name === 'tasks') {
+      if (current_page === 'tasks') {
         $("#table-container tfoot .btn-toolbar").append(floater);
 
         // Prepare
@@ -372,7 +441,7 @@ define(
               tblAlert('success', 'Tasks started!');
             },
             error: function(data) {
-              if (data.readyState === 4) {
+              if (data.readyState === 4 && data.responseJSON !== undefined) {
                 tblAlert('danger', data.responseJSON.error);
               } else {
                 tblAlert('danger', 'Could not start tasks!');
@@ -401,21 +470,23 @@ define(
         });
 
         $(".task_modify").off('click').on('click', function(event) {
-          var selected_task = null;
+          var inherit = {};
           $.each(tbl.getData(true).rows, function(idx, row) {
-            // Only one is selected anyway
-            selected_task = row;
+            // Only one row is selected anyway
+            inherit.task_name = row.name;
+            inherit.plugin = row.plugin;
           });
-          switchTo('task_modify', selected_task);
+          switchTo('task_modify', inherit);
         });
 
         $(".task_new_with_task_tpl").off('click').on('click', function(event) {
-          var selected_task = null;
+          var inherit = {};
           $.each(tbl.getData(true).rows, function(idx, row) {
-            // Only one is selected anyway
-            selected_task = row;
+            // Only one row is selected anyway
+            inherit.task_name = row.name;
+            inherit.plugin = row.plugin;
           });
-          switchTo('task_create', selected_task);
+          switchTo('task_create', inherit);
         });
 
         $(floater).show();

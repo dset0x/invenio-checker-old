@@ -116,3 +116,7 @@
 .tbl_alert {
     display: none;
 }
+
+.reporter-args, .plugin-args {
+    background: #94F8F1 !important;
+}
