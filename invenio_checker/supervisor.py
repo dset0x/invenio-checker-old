@@ -54,6 +54,13 @@ from eliot import (
 from .config import get_eliot_log_path
 eliot_log_path = get_eliot_log_path()
 
+from _pytest.main import (
+    EXIT_OK,
+    EXIT_TESTSFAILED,
+    EXIT_INTERRUPTED,
+    EXIT_INTERNALERROR,
+    EXIT_USAGEERROR,
+)
 
 def _exclusive_paths(path1, path2):
     if not path1.endswith('/'):
@@ -283,8 +290,18 @@ def run_test(self, filepath, master_id, task_id, retval=None):
                             '--invenio-master-id', master_id,
                             filepath])
 
+    # If pytest exited for reason different than a failed check, then something
+    # really did break
+    exit_success = (EXIT_OK,)
+    exit_failure = (EXIT_INTERRUPTED,
+                    EXIT_INTERNALERROR,
+                    EXIT_USAGEERROR,)
+    exit_expected_failure = (EXIT_TESTSFAILED,)
 
-    # TODO: Check retval?
+    if retval in exit_expected_failure:
+        raise Exception("Some tests failed.")
+    if retval in exit_failure:
+        raise Exception("Worker failed with {}.".format(retval))
 
     # Always pass `exc != None` to `self.retry`, because `None` breaks cleanup
     # of workers that are in retry queue (celery/celery#2560)
