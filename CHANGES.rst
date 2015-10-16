@@ -21,9 +21,10 @@
     waive the privileges and immunities granted to it by virtue of its status
     as an Intergovernmental Organization or submit itself to any jurisdiction.
 
+
 Changes
 =======
 
-Version 0.1.0 (release TBD)
+Version 0.1.0 (released TBD)
 
-- First release
+- Initial public release.

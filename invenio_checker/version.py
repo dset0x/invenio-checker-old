@@ -22,11 +22,12 @@
 # waive the privileges and immunities granted to it by virtue of its status
 # as an Intergovernmental Organization or submit itself to any jurisdiction.
 
-"""Version information for Invenio Checker.
+"""Version information for Invenio-Checker.
 
 This file is imported by ``invenio_checker.__init__``,
 and parsed by ``setup.py``.
 """
 
-__version__ = "0.1.0.dev20150000"
+from __future__ import absolute_import, print_function
 
+__version__ = "0.1.0.dev20150000"

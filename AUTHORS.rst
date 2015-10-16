@@ -21,9 +21,12 @@
     waive the privileges and immunities granted to it by virtue of its status
     as an Intergovernmental Organization or submit itself to any jurisdiction.
 
+
 Authors
 =======
 
-Periodic record checker for Invenio.
+(Mostly) record-centric task runner with scheduling capabilities.
 
 - Dimitrios Semitsoglou-Tsiapos <dsemitso@cern.ch>
+- Wojciech Ziółek <wojciech.ziolek@cern.ch>
+- Ergys Dona <errikosd@gmail.com>

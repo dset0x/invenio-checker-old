@@ -41,6 +41,9 @@
         :target: https://github.com/inveniosoftware/invenio-checker/blob/master/LICENSE
 
 
-Invenio module for checking metadata.
+(Mostly) record-centric task runner with scheduling capabilities.
 
-*This is an experimental development preview release.*
+*This is an experimental developer preview release.*
+
+* Free software: GPLv2 license
+* Documentation: https://pythonhosted.org/invenio-checker/

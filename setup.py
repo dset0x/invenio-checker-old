@@ -22,22 +22,48 @@
 # waive the privileges and immunities granted to it by virtue of its status
 # as an Intergovernmental Organization or submit itself to any jurisdiction.
 
-"""Periodic record checker for Invenio."""
+"""(Mostly) record-centric task runner with scheduling capabilities."""
 
 import os
 import platform
 import sys
 
-from setuptools import setup
+from setuptools import find_packages, setup
 from setuptools.command.test import test as TestCommand
-
 
 readme = open('README.rst').read()
 history = open('CHANGES.rst').read()
 
-requirements = [
+tests_require = [
+    'check-manifest>=0.25',
+    'coverage>=4.0',
+    'isort>=4.2.2',
+    'pep257>=0.7.0',
+    'pytest-cache>=1.0',
+    'pytest-cov>=1.8.0',
+    'pytest-pep8>=1.0.6',
+    'pytest>=2.8.0',
+]
+
+extras_require = {
+    'docs': [
+        "Sphinx>=1.3",
+    ],
+    'tests': tests_require,
+}
+
+extras_require['all'] = []
+for reqs in extras_require.values():
+    extras_require['all'].extend(reqs)
+
+setup_requires = [
+    'Babel>=1.3',
+]
+
+install_requires = [
     # General dependencies
     'Flask>=0.10.1',
+    'Flask-BabelEx>=0.9.2',
     'six>=1.9.0',
     'Invenio>=2.0.3',
     # Used for running checks
@@ -68,12 +94,7 @@ requirements = [
 if platform.python_version_tuple() < ('3', '2'):
     requirements.append('backports.functools_lru_cache>=1.0.1')
 
-test_requirements = [
-    'pytest==2.7.2',
-    'pytest-cov>=1.8.0',
-    'pytest-pep8>=1.0.6',
-    'coverage>=3.7.1',
-]
+packages = find_packages()
 
 
 class PyTest(TestCommand):
@@ -96,16 +117,16 @@ class PyTest(TestCommand):
     def finalize_options(self):
         """Finalize pytest."""
         TestCommand.finalize_options(self)
-        self.test_args = []
-        self.test_suite = True
+        if hasattr(self, '_test_args'):
+            self.test_suite = ''
+        else:
+            self.test_args = []
+            self.test_suite = True
 
     def run_tests(self):
         """Run tests."""
         # import here, cause outside the eggs aren't loaded
         import pytest
-        import _pytest.config
-        pm = _pytest.config.get_plugin_manager()
-        pm.consider_setuptools_entrypoints()
         errno = pytest.main(self.pytest_args)
         sys.exit(errno)
 
@@ -116,29 +137,24 @@ with open(os.path.join('invenio_checker', 'version.py'), 'rt') as fp:
     version = g['__version__']
 
 setup(
-    name='Invenio Checker',
+    name='invenio-checker',
     version=version,
     description=__doc__,
     long_description=readme + '\n\n' + history,
-    keywords='invenio checks metadata',
+    keywords='invenio check metadata schedule',
     license='GPLv2',
-    author='Dimitrios Semitsoglou-Tsiapos',
-    author_email='dsemitso@cern.ch',
+    author='CERN',
+    author_email='info@invenio-software.org',
     url='https://github.com/inveniosoftware/invenio-checker',
-    packages=[
-        'invenio_checker',
-    ],
+    packages=packages,
     zip_safe=False,
     include_package_data=True,
     platforms='any',
-    install_requires=requirements,
-    extras_require={
-        'docs': [
-            'Sphinx>=1.3',
-            'sphinx_rtd_theme>=0.1.7'
-        ],
-        'tests': test_requirements
-    },
+    entry_points={},
+    extras_require=extras_require,
+    install_requires=install_requires,
+    setup_requires=setup_requires,
+    tests_require=tests_require,
     classifiers=[
         'Environment :: Web Environment',
         'Intended Audience :: Developers',
@@ -146,14 +162,14 @@ setup(
         'Operating System :: OS Independent',
         'Programming Language :: Python',
         'Topic :: Internet :: WWW/HTTP :: Dynamic Content',
-        'Topic :: Software Development :: Libraries :: Python Modules'
-        "Programming Language :: Python :: 2",
-        # 'Programming Language :: Python :: 2.6',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.7',
-        # 'Programming Language :: Python :: 3',
-        # 'Programming Language :: Python :: 3.3',
-        # 'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.3',
+        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
+        'Development Status :: 1 - Planning',
     ],
-    tests_require=test_requirements,
     cmdclass={'test': PyTest},
 )
